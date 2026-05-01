@@ -1,0 +1,7 @@
+flask
+apscheduler
+rapidfuzz
+python-dateutil
+requests
+waitress
+   
