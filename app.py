@@ -69,6 +69,29 @@ def schedule():
         "confidence": "low"
     })
 
+@app.route('/health')
+def health():
+    return {"status": "ok", "service": "GridAlert API", "version": "0.1"}, 200
+
+@app.route('/pricing')
+def pricing():
+    return {
+        "currency": "USD",
+        "plans": {
+            "free": {"price": 0, "requests_per_day": 100},
+            "starter": {"price": 49, "requests_per_month": 10000}
+        },
+        "contact": "whatsapp +260-XXX-XXX-XXX"
+    }, 200
+
+@app.route('/')
+def home():
+    return {
+        "service": "GridAlert ZESCO API",
+        "docs": "/health for status, /pricing for plans",
+        "status": "live"
+    }, 200
+
 if __name__ == '__main__':
     exec(open('init_db.py').read())
     app.run(host='0.0.0.0', port=5000)
