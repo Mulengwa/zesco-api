@@ -81,7 +81,7 @@ def pricing():
             "free": {"price": 0, "requests_per_day": 100},
             "starter": {"price": 49, "requests_per_month": 10000}
         },
-        "contact": "whatsapp +260-XXX-XXX-XXX"
+        "contact": "whatsapp +260-969-139-207"
     }, 200
 
 @app.route('/')
