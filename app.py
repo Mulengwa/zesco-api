@@ -11,16 +11,6 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-@app.route('/')
-def home():
-    return jsonify({
-        "service": "ZESCO Loadshedding API",
-        "version": "1.0",
-        "data_status": "last_known_2025",
-        "docs": "/v1/schedule?area=Chipata Town",
-        "note": "Loadshedding reduced. Using last published schedules."
-    })
-
 @app.route('/v1/areas')
 def list_areas():
     conn = get_db()
