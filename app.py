@@ -3,6 +3,9 @@ import sqlite3
 from datetime import datetime
 from rapidfuzz import process
 
+import datetime
+from flask import request
+
 app = Flask(__name__)
 DB = 'zesco.db'
 
@@ -65,14 +68,27 @@ def health():
 
 @app.route('/pricing')
 def pricing():
-    return {
+    return jsonify({
+        "product": "GridAlert ZESCO API",
+        "contact": "whatsapp +260-969-139-207",
         "currency": "USD",
+        "base_url": "https://gridalert-api.onrender.com",
+        "main_endpoint": "/v1/schedule?api_key=YOUR_KEY&group=4&date=2026-05-05",
+        "free_test_key": "free_demo_123",
         "plans": {
-            "free": {"price": 0, "requests_per_day": 100},
-            "starter": {"price": 49, "requests_per_month": 10000}
+            "free": {
+                "price": 0, 
+                "requests_per_day": 100,
+                "note": "For testing only"
+            },
+            "starter": {
+                "price": 49, 
+                "requests_per_month": 10000,
+                "support": "WhatsApp priority"
+            }
         },
-        "contact": "whatsapp +260-969-139-207"
-    }, 200
+        "launch_offer": "Live ZESCO data ships Fri 9th May. Buy now, get grandfathered at $49."
+    })
 
 @app.route('/')
 def home():
