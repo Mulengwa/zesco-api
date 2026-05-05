@@ -2,13 +2,12 @@ from flask import Flask, request, jsonify
 import sqlite3
 import os
 from datetime import datetime
-from rapidfuzz import process
 
 app = Flask(__name__)
 DB = 'zesco.db'
 
 # ============================================
-# AUTO-CREATE DB - Fixes 500 errors on Render
+# AUTO-CREATE DB - No external deps
 # ============================================
 def init_db():
     if not os.path.exists(DB):
@@ -28,7 +27,7 @@ def init_db():
             slot2_end TEXT,
             source TEXT
         )''')
-        # Sample data so endpoints work immediately
+        # Sample data
         conn.execute("INSERT OR IGNORE INTO areas (name, group_name) VALUES ('Lusaka', '4')")
         conn.execute("INSERT OR IGNORE INTO areas (name, group_name) VALUES ('Kitwe', '7')")
         conn.execute("INSERT OR IGNORE INTO areas (name, group_name) VALUES ('Ndola', '1')")
@@ -44,11 +43,10 @@ def init_db():
         conn.commit()
         conn.close()
 
-# Create DB on startup
 init_db()
 
 # ============================================
-# API KEY SYSTEM
+# API KEYS
 # ============================================
 API_KEYS = {
     "free_demo_123": {"tier": "free", "calls_made": 0, "limit": 100},
@@ -56,9 +54,6 @@ API_KEYS = {
     "starter_customer2": {"tier": "starter", "calls_made": 0, "limit": 10000}
 }
 
-# ============================================
-# DATABASE HELPER
-# ============================================
 def get_db():
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
@@ -84,7 +79,7 @@ def list_areas():
 
 @app.route('/v1/schedule')
 def schedule():
-    """FREE ENDPOINT - Real DB data via area name"""
+    """FREE ENDPOINT - No fuzzy matching, exact or LIKE match"""
     area_query = request.args.get('area')
     if not area_query:
         return jsonify({
@@ -95,40 +90,21 @@ def schedule():
 
     try:
         conn = get_db()
-        areas = [row['name'] for row in conn.execute('SELECT name FROM areas')]
-
-        if not areas:
-            conn.close()
-            return jsonify({
-                "error": "Database initializing",
-                "note": "Use /v1/schedule-key?api_key=free_demo_123&group=4 for demo data",
-                "upgrade": "WhatsApp +260-969-139-207"
-            }), 503
-
-        match = process.extractOne(area_query, areas, score_cutoff=70)
-        if not match:
-            conn.close()
-            return jsonify({
-                "error": f"Area '{area_query}' not found",
-                "available": areas,
-                "try": "/v1/areas"
-            }), 404
-
-        area = match[0]
-
+        # Simple case-insensitive LIKE instead of rapidfuzz
         row = conn.execute('''
-            SELECT a.group_name, s.date, s.slot1_start,
+            SELECT a.name, a.group_name, s.date, s.slot1_start,
             s.slot1_end, s.slot2_start, s.slot2_end, s.source
             FROM areas a JOIN schedules s ON a.group_name = s.group_name
-            WHERE a.name =? ORDER BY s.date DESC LIMIT 1
-        ''', (area,)).fetchone()
+            WHERE LOWER(a.name) LIKE LOWER(?)
+            ORDER BY s.date DESC LIMIT 1
+        ''', (f'%{area_query}%',)).fetchone()
         conn.close()
 
         if not row:
             return jsonify({
-                "error": "No schedule data for this area",
-                "area": area,
-                "note": "Loadshedding significantly reduced in 2026. Try /v1/schedule-key for demo"
+                "error": f"Area '{area_query}' not found",
+                "note": "Try /v1/areas for full list",
+                "demo": "/v1/schedule-key?api_key=free_demo_123&group=4"
             }), 404
 
         slots = []
@@ -137,13 +113,13 @@ def schedule():
                 slots.append({"start": start, "end": end})
 
         return jsonify({
-            "area": area,
+            "area": row['name'],
             "group": row['group_name'],
             "status": "last_known_schedule",
             "data_date": row['date'],
             "source": row['source'],
             "cuts": slots,
-            "note": "Loadshedding significantly reduced in 2026. No current schedule published by ZESCO.",
+            "note": "Loadshedding significantly reduced in 2026.",
             "confidence": "low"
         })
     except Exception as e:
@@ -151,7 +127,7 @@ def schedule():
 
 @app.route('/v1/schedule-key')
 def get_schedule_key():
-    """PAID ENDPOINT - API key required, rate limited"""
+    """PAID ENDPOINT - No DB needed"""
     api_key = request.args.get('api_key')
     if not api_key:
         return {
@@ -184,8 +160,48 @@ def get_schedule_key():
         return {"error": "group must be a number 1-12"}, 400
 
     date = request.args.get('date', datetime.now().date().isoformat())
-
     API_KEYS[api_key]["calls_made"] += 1
 
-    # Dummy data for now - replace with real DB lookup after first sale
-    dummy_schedules = {
+    return {
+        "group": group,
+        "date": date,
+        "outages": [
+            {"start": "06:00", "end": "10:00", "duration_hours": 4},
+            {"start": "14:00", "end": "18:00", "duration_hours": 4}
+        ],
+        "total_outage_hours": 8,
+        "source": "ZESCO",
+        "api_tier": key_data["tier"],
+        "calls_remaining": key_data["limit"] - key_data["calls_made"],
+        "note": "Demo data. Live ZESCO feed ships Fri 9th May."
+    }, 200
+
+@app.route('/pricing')
+def pricing():
+    return jsonify({
+        "product": "GridAlert ZESCO API",
+        "contact": "whatsapp +260-969-139-207",
+        "currency": "USD",
+        "base_url": "https://gridalert-api.onrender.com",
+        "endpoints": {
+            "free_public": "/v1/schedule?area=Lusaka",
+            "paid_api": "/v1/schedule-key?api_key=YOUR_KEY&group=4"
+        },
+        "free_test_key": "free_demo_123",
+        "plans": {
+            "free": {"price": 0, "requests_per_day": 100},
+            "starter": {"price": 49, "requests_per_month": 10000}
+        }
+    })
+
+@app.route('/')
+def home():
+    return {
+        "service": "GridAlert ZESCO API",
+        "docs": "/health, /pricing, /v1/areas",
+        "status": "live",
+        "version": "2.2"
+    }, 200
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
