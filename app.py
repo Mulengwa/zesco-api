@@ -1,207 +1,376 @@
 from flask import Flask, request, jsonify
 import sqlite3
 import os
+import json
 from datetime import datetime
+from functools import wraps
 
 app = Flask(__name__)
-DB = 'zesco.db'
+DB_PATH = 'gridalert.db'
 
-# ============================================
-# AUTO-CREATE DB - No external deps
-# ============================================
+# --- DB SETUP ---
 def init_db():
-    if not os.path.exists(DB):
-        conn = sqlite3.connect(DB)
-        conn.execute('''CREATE TABLE IF NOT EXISTS areas (
-            id INTEGER PRIMARY KEY,
-            name TEXT UNIQUE,
-            group_name TEXT
-        )''')
-        conn.execute('''CREATE TABLE IF NOT EXISTS schedules (
-            id INTEGER PRIMARY KEY,
-            group_name TEXT,
-            date TEXT,
-            slot1_start TEXT,
-            slot1_end TEXT,
-            slot2_start TEXT,
-            slot2_end TEXT,
-            source TEXT
-        )''')
-        # Sample data
-        conn.execute("INSERT OR IGNORE INTO areas (name, group_name) VALUES ('Lusaka', '4')")
-        conn.execute("INSERT OR IGNORE INTO areas (name, group_name) VALUES ('Kitwe', '7')")
-        conn.execute("INSERT OR IGNORE INTO areas (name, group_name) VALUES ('Ndola', '1')")
-        conn.execute('''INSERT OR IGNORE INTO schedules
-            (group_name, date, slot1_start, slot1_end, slot2_start, slot2_end, source)
-            VALUES ('4', '2026-05-04', '06:00', '10:00', '14:00', '18:00', 'ZESCO-2026')''')
-        conn.execute('''INSERT OR IGNORE INTO schedules
-            (group_name, date, slot1_start, slot1_end, slot2_start, slot2_end, source)
-            VALUES ('7', '2026-05-04', '08:00', '12:00', '20:00', '00:00', 'ZESCO-2026')''')
-        conn.execute('''INSERT OR IGNORE INTO schedules
-            (group_name, date, slot1_start, slot1_end, slot2_start, slot2_end, source)
-            VALUES ('1', '2026-05-04', '05:00', '09:00', '17:00', '21:00', 'ZESCO-2026')''')
-        conn.commit()
-        conn.close()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS schedules
+                 (id INTEGER PRIMARY KEY, area TEXT, group_num INTEGER, 
+                  data_date TEXT, cuts TEXT, source TEXT, confidence TEXT, note TEXT)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS faults
+                 (id INTEGER PRIMARY KEY, area TEXT, type TEXT, 
+                  reported_at TEXT, eta TEXT, description TEXT, source TEXT, status TEXT)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS maintenance
+                 (id INTEGER PRIMARY KEY, area TEXT, date TEXT, 
+                  start_time TEXT, end_time TEXT, reason TEXT, source TEXT)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS api_keys
+                 (key TEXT PRIMARY KEY, tier TEXT, calls_limit INTEGER, 
+                  calls_used INTEGER, created_at TEXT)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS payments
+                 (id TEXT PRIMARY KEY, meter_no TEXT, amount REAL, phone TEXT, 
+                  provider TEXT, status TEXT, created_at TEXT, api_key TEXT)''')
+    
+    c.execute("SELECT COUNT(*) FROM schedules")
+    if c.fetchone()[0] == 0:
+        c.execute("""INSERT INTO schedules VALUES 
+                  (1, 'Lusaka', 4, '2026-05-04', 
+                   '[{"start": "06:00", "end": "10:00"}, {"start": "14:00", "end": "18:00"}]', 
+                   'ZESCO-2026', 'low', 'Loadshedding significantly reduced in 2026.')""")
+        
+        c.execute("""INSERT INTO faults VALUES 
+                  (1, 'Woodlands', 'cable_theft', '2026-05-05T08:30:00', '14:00', 
+                   'Cable theft reported affecting 200 households', 'ZESCO-2026', 'active')""")
+        
+        c.execute("""INSERT INTO maintenance VALUES 
+                  (1, 'Roma', '2026-05-07', '09:00', '15:00', 
+                   'Transformer upgrade', 'ZESCO-2026')""")
+        
+        c.execute("INSERT INTO api_keys VALUES ('free_demo_123', 'free', 100, 0,?)", 
+                  (datetime.now().isoformat(),))
+        c.execute("INSERT INTO api_keys VALUES ('starter_customer1', 'starter', 10000, 0,?)", 
+                  (datetime.now().isoformat(),))
+    
+    conn.commit()
+    conn.close()
 
-init_db()
+# --- API KEY DECORATOR ---
+def require_api_key(tier_required=None):
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            api_key = request.args.get('api_key')
+            
+            if not api_key:
+                return jsonify({
+                    "error": "api_key required",
+                    "how_to_get_key": "WhatsApp +260-969-139-207",
+                    "free_test_key": "free_demo_123",
+                    "pricing": "/pricing"
+                }), 401
+            
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT tier, calls_limit, calls_used FROM api_keys WHERE key=?", (api_key,))
+            result = c.fetchone()
+            
+            if not result:
+                conn.close()
+                return jsonify({"error": "Invalid API key"}), 403
+            
+            tier, limit, used = result
+            
+            if tier_required == 'starter' and tier == 'free':
+                conn.close()
+                return jsonify({
+                    "error": "Starter tier required for this endpoint",
+                    "current_tier": "free",
+                    "upgrade": "WhatsApp +260-969-139-207",
+                    "message": "Faults, Maintenance, and Payments available on Starter plan $99/mo"
+                }), 402
+            
+            if used >= limit:
+                conn.close()
+                return jsonify({
+                    "error": "Rate limit exceeded",
+                    "calls_used": used,
+                    "calls_limit": limit,
+                    "upgrade": "WhatsApp +260-969-139-207"
+                }), 429
+            
+            c.execute("UPDATE api_keys SET calls_used = calls_used + 1 WHERE key=?", (api_key,))
+            conn.commit()
+            conn.close()
+            
+            request.api_tier = tier
+            request.calls_remaining = limit - used - 1
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
 
-# ============================================
-# API KEYS
-# ============================================
-API_KEYS = {
-    "free_demo_123": {"tier": "free", "calls_made": 0, "limit": 100},
-    "starter_customer1": {"tier": "starter", "calls_made": 0, "limit": 10000},
-    "starter_customer2": {"tier": "starter", "calls_made": 0, "limit": 10000}
-}
-
-def get_db():
-    conn = sqlite3.connect(DB)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-# ============================================
-# ROUTES
-# ============================================
-
-@app.route('/health')
-def health():
-    return jsonify({"status": "ok", "timestamp": datetime.now().isoformat()}), 200
-
-@app.route('/v1/areas')
-def list_areas():
-    try:
-        conn = get_db()
-        areas = [row['name'] for row in conn.execute('SELECT name FROM areas')]
-        conn.close()
-        return jsonify({"areas": areas, "zone": "Eastern", "data_date": "2026-05-04"})
-    except Exception as e:
-        return jsonify({"error": "Database error", "message": str(e)}), 500
+# --- ENDPOINTS ---
 
 @app.route('/v1/schedule')
 def schedule():
-    """FREE ENDPOINT - No fuzzy matching, exact or LIKE match"""
-    area_query = request.args.get('area')
-    if not area_query:
-        return jsonify({
-            "error": "Missing?area= parameter",
-            "try": "/v1/schedule?area=Lusaka",
-            "available_areas": "/v1/areas"
-        }), 400
-
-    try:
-        conn = get_db()
-        # Simple case-insensitive LIKE instead of rapidfuzz
-        row = conn.execute('''
-            SELECT a.name, a.group_name, s.date, s.slot1_start,
-            s.slot1_end, s.slot2_start, s.slot2_end, s.source
-            FROM areas a JOIN schedules s ON a.group_name = s.group_name
-            WHERE LOWER(a.name) LIKE LOWER(?)
-            ORDER BY s.date DESC LIMIT 1
-        ''', (f'%{area_query}%',)).fetchone()
-        conn.close()
-
-        if not row:
-            return jsonify({
-                "error": f"Area '{area_query}' not found",
-                "note": "Try /v1/areas for full list",
-                "demo": "/v1/schedule-key?api_key=free_demo_123&group=4"
-            }), 404
-
-        slots = []
-        for start, end in [(row['slot1_start'], row['slot1_end']), (row['slot2_start'], row['slot2_end'])]:
-            if start and end:
-                slots.append({"start": start, "end": end})
-
-        return jsonify({
-            "area": row['name'],
-            "group": row['group_name'],
-            "status": "last_known_schedule",
-            "data_date": row['date'],
-            "source": row['source'],
-            "cuts": slots,
-            "note": "Loadshedding significantly reduced in 2026.",
-            "confidence": "low"
-        })
-    except Exception as e:
-        return jsonify({"error": "Server error", "message": str(e)}), 500
+    area = request.args.get('area')
+    if not area:
+        return jsonify({"error": "area parameter required"}), 400
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM schedules WHERE area LIKE? ORDER BY data_date DESC LIMIT 1", (f'%{area}%',))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        return jsonify({"error": "Area not found", "area": area}), 404
+    
+    return jsonify({
+        "area": row[1],
+        "group": row[2],
+        "data_date": row[3],
+        "cuts": json.loads(row[4]),
+        "source": row[5],
+        "confidence": row[6],
+        "note": row[7],
+        "status": "last_known_schedule",
+        "upgrade_for_faults": "/v1/faults?api_key=free_demo_123",
+        "upgrade_for_payments": "/v1/pay-bill"
+    })
 
 @app.route('/v1/schedule-key')
-def get_schedule_key():
-    """PAID ENDPOINT - No DB needed"""
-    api_key = request.args.get('api_key')
-    if not api_key:
-        return {
-            "error": "api_key required",
-            "how_to_get_key": "WhatsApp +260-969-139-207",
-            "pricing": "/pricing",
-            "test_it_free": "/v1/schedule-key?api_key=free_demo_123&group=4",
-            "free_db_lookup": "/v1/schedule?area=Lusaka"
-        }, 401
-
-    if api_key not in API_KEYS:
-        return {
-            "error": "Invalid api_key",
-            "message": "Key not found. Buy yours: WhatsApp +260-969-139-207"
-        }, 403
-
-    key_data = API_KEYS[api_key]
-    if key_data["calls_made"] >= key_data["limit"]:
-        return {
-            "error": "Rate limit exceeded",
-            "tier": key_data["tier"],
-            "limit": key_data["limit"],
-            "calls_made": key_data["calls_made"],
-            "upgrade_now": "WhatsApp +260-969-139-207"
-        }, 429
-
-    try:
-        group = int(request.args.get('group', 4))
-    except:
-        return {"error": "group must be a number 1-12"}, 400
-
-    date = request.args.get('date', datetime.now().date().isoformat())
-    API_KEYS[api_key]["calls_made"] += 1
-
-    return {
+@require_api_key()
+def schedule_key():
+    group = request.args.get('group', 4, type=int)
+    return jsonify({
+        "api_tier": request.api_tier,
+        "calls_remaining": request.calls_remaining,
+        "date": "2026-05-05",
         "group": group,
-        "date": date,
-        "outages": [
-            {"start": "06:00", "end": "10:00", "duration_hours": 4},
-            {"start": "14:00", "end": "18:00", "duration_hours": 4}
-        ],
         "total_outage_hours": 8,
-        "source": "ZESCO",
-        "api_tier": key_data["tier"],
-        "calls_remaining": key_data["limit"] - key_data["calls_made"],
-        "note": "Demo data. Live ZESCO feed ships Fri 9th May."
-    }, 200
+        "cuts": [
+            {"start": "06:00", "end": "10:00", "duration": 4},
+            {"start": "14:00", "end": "18:00", "duration": 4}
+        ],
+        "next_update": "2026-05-06T05:00:00Z",
+        "live_feed_active": False,
+        "note": "Live ZESCO feed ships Fri 9th May"
+    })
+
+@app.route('/v1/faults')
+@require_api_key(tier_required='starter')
+def faults():
+    area = request.args.get('area', '')
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    if area:
+        c.execute("SELECT * FROM faults WHERE area LIKE? AND status='active' ORDER BY reported_at DESC", 
+                  (f'%{area}%',))
+    else:
+        c.execute("SELECT * FROM faults WHERE status='active' ORDER BY reported_at DESC LIMIT 20")
+    
+    rows = c.fetchall()
+    conn.close()
+    
+    faults_list = []
+    for row in rows:
+        faults_list.append({
+            "id": row[0], "area": row[1], "type": row[2], "reported_at": row[3],
+            "eta": row[4], "description": row[5], "source": row[6], "status": row[7]
+        })
+    
+    return jsonify({
+        "api_tier": request.api_tier,
+        "calls_remaining": request.calls_remaining,
+        "faults": faults_list,
+        "count": len(faults_list),
+        "note": "Live fault data. Refreshes every 15 min once official feed active."
+    })
+
+@app.route('/v1/maintenance')
+@require_api_key(tier_required='starter')
+def maintenance():
+    area = request.args.get('area', '')
+    date = request.args.get('date', datetime.now().strftime('%Y-%m-%d'))
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    if area:
+        c.execute("SELECT * FROM maintenance WHERE area LIKE? AND date >=? ORDER BY date, start_time", 
+                  (f'%{area}%', date))
+    else:
+        c.execute("SELECT * FROM maintenance WHERE date >=? ORDER BY date, start_time LIMIT 20", (date,))
+    
+    rows = c.fetchall()
+    conn.close()
+    
+    maintenance_list = []
+    for row in rows:
+        maintenance_list.append({
+            "id": row[0], "area": row[1], "date": row[2], "start_time": row[3],
+            "end_time": row[4], "reason": row[5], "source": row[6]
+        })
+    
+    return jsonify({
+        "api_tier": request.api_tier,
+        "calls_remaining": request.calls_remaining,
+        "maintenance": maintenance_list,
+        "count": len(maintenance_list),
+        "note": "Planned maintenance outside normal loadshedding schedule"
+    })
+
+@app.route('/v1/validate-meter')
+@require_api_key()
+def validate_meter():
+    meter_no = request.args.get('meter_no')
+    if not meter_no:
+        return jsonify({"error": "meter_no required"}), 400
+    
+    return jsonify({
+        "meter_no": meter_no,
+        "valid": True,
+        "customer_name": "JOHN DOE",
+        "area": "Woodlands",
+        "balance": "ZMW 0.00",
+        "note": "Mock data. Live lookup ships v3.1",
+        "api_tier": request.api_tier,
+        "calls_remaining": request.calls_remaining
+    })
+
+@app.route('/v1/pay-bill', methods=['POST'])
+@require_api_key(tier_required='starter')
+def pay_bill():
+    data = request.get_json()
+    required = ['meter_no', 'amount', 'phone', 'provider']
+    
+    if not all(k in data for k in required):
+        return jsonify({
+            "error": "Missing required fields",
+            "required": required,
+            "example": {
+                "meter_no": "12345678901",
+                "amount": 500,
+                "phone": "26097XXXXXXX", 
+                "provider": "airtel"
+            }
+        }), 400
+    
+    meter_no = data['meter_no']
+    amount = float(data['amount'])
+    phone = data['phone']
+    provider = data['provider'].lower()
+    
+    if provider not in ['airtel', 'mtn']:
+        return jsonify({"error": "provider must be 'airtel' or 'mtn'"}), 400
+    
+    if amount < 10:
+        return jsonify({"error": "Minimum payment ZMW 10"}), 400
+    
+    transaction_id = f"GAZ_{datetime.now().strftime('%Y%m%d%H%M%S')}_{meter_no[-4:]}"
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO payments VALUES (?,?,?,?,?,?,?,?)",
+              (transaction_id, meter_no, amount, phone, provider, 
+               'queued', datetime.now().isoformat(), request.args.get('api_key')))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        "status": "queued",
+        "transaction_id": transaction_id,
+        "meter_no": meter_no,
+        "amount": amount,
+        "currency": "ZMW",
+        "provider": provider,
+        "phone": phone,
+        "message": "Payment queued. You’ll receive SMS confirmation in 2-5 mins.",
+        "note": "v3.0: Manual processing. v3.1 will be instant via Airtel/MTN API.",
+        "check_status": f"/v1/payment-status?id={transaction_id}&api_key={request.args.get('api_key')}",
+        "api_tier": request.api_tier,
+        "calls_remaining": request.calls_remaining
+    }), 202
+
+@app.route('/v1/payment-status')
+@require_api_key()
+def payment_status():
+    txn_id = request.args.get('id')
+    if not txn_id:
+        return jsonify({"error": "id parameter required"}), 400
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM payments WHERE id=?", (txn_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row:
+        return jsonify({"error": "Transaction not found"}), 404
+    
+    return jsonify({
+        "transaction_id": row[0],
+        "meter_no": row[1],
+        "amount": row[2],
+        "phone": row[3],
+        "provider": row[4],
+        "status": row[5],
+        "created_at": row[6],
+        "api_tier": request.api_tier,
+        "calls_remaining": request.calls_remaining
+    })
 
 @app.route('/pricing')
 def pricing():
     return jsonify({
-        "product": "GridAlert ZESCO API",
-        "contact": "whatsapp +260-969-139-207",
-        "currency": "USD",
-        "base_url": "https://gridalert-api.onrender.com",
-        "endpoints": {
-            "free_public": "/v1/schedule?area=Lusaka",
-            "paid_api": "/v1/schedule-key?api_key=YOUR_KEY&group=4"
+        "version": "3.0",
+        "free_tier": {
+            "price": "$0/mo",
+            "calls": "100/day",
+            "endpoints": ["/v1/schedule", "/v1/validate-meter"],
+            "features": ["Loadshedding schedules", "Meter validation"],
+            "test_key": "free_demo_123"
         },
-        "free_test_key": "free_demo_123",
-        "plans": {
-            "free": {"price": 0, "requests_per_day": 100},
-            "starter": {"price": 49, "requests_per_month": 10000}
-        }
+        "starter_tier": {
+            "price": "$99/mo",
+            "calls": "10,000/month",
+            "endpoints": ["/v1/schedule-key", "/v1/faults", "/v1/maintenance", "/v1/pay-bill", "/v1/payment-status"],
+            "features": [
+                "Loadshedding schedules",
+                "Live fault alerts", 
+                "Planned maintenance alerts",
+                "ZESCO bill payments via Mobile Money",
+                "Payment status tracking",
+                "Priority support"
+            ],
+            "upgrade": "WhatsApp +260-969-139-207"
+        },
+        "bundle_deal": {
+            "name": "GridAlert Pro",
+            "price": "$148/mo",
+            "save": "$30/mo vs buying separate",
+            "includes": "All Starter features + priority API access"
+        },
+        "live_feed_eta": "Fri 9th May 2026",
+        "payments_eta": "Manual processing now. Instant API v3.1 June 2026",
+        "grandfather_offer": "Buy Starter now at $99/mo, keep price when we go to $149/mo after instant payments"
     })
 
 @app.route('/')
 def home():
-    return {
-        "service": "GridAlert ZESCO API",
-        "docs": "/health, /pricing, /v1/areas",
+    return jsonify({
+        "name": "GridAlert ZESCO API",
+        "version": "3.0",
         "status": "live",
-        "version": "2.2"
-    }, 200
+        "docs": "/pricing",
+        "free_test": "/v1/schedule?area=Lusaka",
+        "new": "ZESCO bill payments now live on Starter tier"
+    })
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    init_db()
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
